@@ -274,11 +274,14 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
     // returns rewards unharvested
     function rewardsAvailable() public view returns (uint256) {
         uint256 nativeBal = 0;
-        for (uint i; i < rewards.length; ++i) {
-            if (rewards[i] != output) {
-                uint256 bal = IERC20(rewards[i]).balanceOf(address(this));
-                if (bal > 0) {
-                    nativeBal = nativeBal + IUniV3Quoter(quoter).quoteExactInput(extraRewards[rewards[i]].routeToNative, bal);
+
+        for (uint i; i < IGammaMasterchef(chef).poolInfo[poolId].length; ++i) {
+            IGammaRewarder _rewarder = IGammaMasterchef(chef).getRewarder(poolId, i);
+            if (address(_rewarder) != address(0)) {
+                require(rewards[i] == _rewarder.rewardToken(), "rewards not in right order");
+                uint256 pending = _rewarder.pendingToken(poolId, address(this));
+                if (pending > 0) {
+                     nativeBal = nativeBal + IUniV3Quoter(quoter).quoteExactInput(extraRewards[rewards[i]].routeToNative, bal);
                 }
             }
         }
