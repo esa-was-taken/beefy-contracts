@@ -425,7 +425,7 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
         return _solidlyToRoute(_route);
     }
 
-    function nativeToLp1() external view returns (address[] memory) {
+    function lp0ToLp1Route() external view returns (address[] memory) {
         ISolidlyRouter.Routes[] memory _route = lp0ToLp1Route;
         return _solidlyToRoute(_route);
     }
