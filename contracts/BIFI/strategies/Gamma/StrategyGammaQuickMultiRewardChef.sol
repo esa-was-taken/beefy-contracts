@@ -7,6 +7,7 @@ import "@openzeppelin-4/contracts/token/ERC20/utils/SafeERC20.sol";
 import "../../interfaces/common/ISolidlyRouter.sol";
 import "../../interfaces/common/ISolidlyPair.sol";
 import "../../interfaces/common/IUniswapRouterV3.sol";
+import "../../interfaces/common/IUniV3Quoter.sol";
 import "../../interfaces/common/IERC20Extended.sol";
 import "../Common/StratFeeManagerInitializable.sol";
 import "../../utils/UniV3Actions.sol";
@@ -28,6 +29,8 @@ import "../../interfaces/gamma/IHypervisorProxy.sol";
         Swap rewards to native
         Take fee
         Swap native to lpToken0 and lpToken1 according to ratio in LP
+           v3.exactOutput(path, this, lp0, nativeBal)
+           v3.exactOutput(path, this, lp1, nativeBal)
         Deposit lpToken0 and lpToken1 to get want LP
         Deposit want LP into chef 
     Withdraw
@@ -50,6 +53,7 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
     address public hypervisor; // NOTE: UniProxy 
     address public chef; // NOTE: Masterchef
     address public algebraV3Router; // NOTE: Quickswap
+    address public quoter; // NOTE: Quickswap quoter
     uint256 public poolId;
 
     bool public harvestOnDeposit;
@@ -58,7 +62,7 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
     
     ISolidlyRouter.Routes[] public outputToNativeRoute;
     ISolidlyRouter.Routes[] public nativeToLp0Route;
-    ISolidlyRouter.Routes[] public nativeToLp1Route;
+    ISolidlyRouter.Routes[] public lp0ToLp1Route;
     address[] public rewards; // NOTE: [dQuick, LCD]
     mapping(address => ISolidlyRouter.Routes[]) public extraRewards;
 
@@ -73,10 +77,11 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
         address _hypervisorProxy,
         address _chef,
         uint256 _poolId,
+        address _quoter,
         CommonAddresses calldata _commonAddresses,
         ISolidlyRouter.Routes[] calldata _outputToNativeRoute,
         ISolidlyRouter.Routes[] calldata _nativeToLp0Route,
-        ISolidlyRouter.Routes[] calldata _nativeToLp1Route,
+        ISolidlyRouter.Routes[] calldata _lp0ToLp1Route,
         bool _stable
     )  public initializer  {
          __StratFeeManager_init(_commonAddresses);
@@ -85,6 +90,7 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
         hypervisorProxy = _hypervisorProxy;
         chef = _chef;
         poolId = _poolId;
+        quoter = _quoter;
         algebraV3Router = address(0xf5b509bB0909a69B1c207E495f687a596C168E12);
 
         for (uint i; i < _outputToNativeRoute.length; ++i) {
@@ -95,14 +101,14 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
             nativeToLp0Route.push(_nativeToLp0Route[i]);
         }
 
-        for (uint i; i < _nativeToLp1Route.length; ++i) {
-            nativeToLp1Route.push(_nativeToLp1Route[i]);
+        for (uint i; i < _lp0ToLp1Route.length; ++i) {
+            lp0ToLp1Route.push(_lp0ToLp1Route[i]);
         }
 
         output = outputToNativeRoute[0].from;
         native = outputToNativeRoute[outputToNativeRoute.length -1].to;
         lpToken0 = nativeToLp0Route[nativeToLp0Route.length - 1].to;
-        lpToken1 = nativeToLp1Route[nativeToLp1Route.length - 1].to;
+        lpToken1 = lp0ToLp1Route[lp0ToLp1Route.length - 1].to;
 
         shouldSweep = true;
 
@@ -228,17 +234,21 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
     function addLiquidity() internal {
         uint256 nativeBal = IERC20(native).balanceOf(address(this));
 
-        (uint256 total0, uint256 total1) = IHypervisor(hypervisor).getTotalAmounts();
-        uint256 ratio = total0 * 1e18 / total1;
-        uint256 lp0Amt = nativeBal * ratio / (ratio + 1e18);
-        uint256 lp1Amt = nativeBal - lp0Amt;
-
-        if (lpToken0 != native) {
-            UniV3Actions.swapV3WithDeadline(algebraV3Router, nativeToLp0Route, lp0Amt);
-        }
-
-        if (lpToken1 != native) {
-            UniV3Actions.swapV3WithDeadline(algebraV3Router, nativeToLp1Route, lp1Amt);
+        // Swap 100% native to token0
+        // Calculate required token amount of token1 given 50% token0 
+        // Swap 50% token0 with minimum required token1 amount        
+        if (lpToken0 == native || lpToken0 != native && lpToken1 != native) {
+            if(lpToken0 != native) {
+                  UniV3Actions.swapV3WithDeadline(algebraV3Router, nativeToLp0Route, nativeBal);
+            }          
+            uint256 lp0BalHalf = IERC20(lpToken0).balanceOf(address(this)) / 2;
+            (uint256 lp1RequiredMin, ) = IHypervisorProxy(hypervisorProxy).getDepositAmount(address(hypervisor), address(lpToken0), lp0BalHalf);
+            UniV3Actions.swapReverseV3(algebraV3Router, Lp0ToLp1Route, lp1RequiredMin, lp0BalHalf);
+        } else {
+            assert(lpToken1 == native);
+            uint256 lp1BalHalf = IERC20(lpToken1).balanceOf(address(this)) / 2;
+            (uint256 lp0RequiredMin, ) = IHypervisorProxy(hypervisorProxy).getDepositAmount(address(hypervisor), address(lpToken1), lp1BalHalf);
+            UniV3Actions.swapReverseV3(algebraV3Router, nativeToLp0Route, lp0RequiredMin, lp1BalHalf);
         }
 
         uint256 lp0Bal = IERC20(lpToken0).balanceOf(address(this));
@@ -265,26 +275,21 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
     // returns rewards unharvested
     function rewardsAvailable() public view returns (uint256) {
         uint256 nativeBal = 0;
-        for( uint256 i = 0; i < IGammaMasterchef(chef).poolInfo[pid].rewarders.length; i++) {
-            IRewarder _rewarder = IGammaMasterchef(chef).poolInfo[pid].rewarders[i];
-            if (address(_rewarder) != address(0)) {
-                uint256 pending = _rewarder.pendingToken(pid, to);
-                IUniswapRouterV3(algebraV3Router).
+        for (uint i; i < rewards.length; ++i) {
+            if (rewards[i] != output) {
+                uint256 bal = IERC20(rewards[i]).balanceOf(address(this));
+                if (bal > 0) {
+                    nativeBal = nativeBal + IUniV3Quoter(quoter).quoteExactInput(extraRewards[rewards[i]].routeToNative, bal);
+                }
             }
         }
-
-        return ISolidlychef(chef).earned(output, address(this));
+        return nativeBal;
     }
 
     // native reward amount for calling harvest
     function callReward() public view returns (uint256) {
         IFeeConfig.FeeCategory memory fees = getFees();
-        uint256 outputBal = rewardsAvailable();
-        uint256 nativeOut;
-        if (outputBal > 0) {
-            (nativeOut,) = ISolidlyRouter(unirouter).getAmountOut(outputBal, output, native);
-            }
-
+        uint256 nativeOut = rewardsAvailable();
         return nativeOut * fees.total / DIVISOR * fees.call / DIVISOR;
     }
 
@@ -433,7 +438,7 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
     }
 
     function nativeToLp1() external view returns (address[] memory) {
-        ISolidlyRouter.Routes[] memory _route = nativeToLp1Route;
+        ISolidlyRouter.Routes[] memory _route = lp0ToLp1Route;
         return _solidlyToRoute(_route);
     }
 
