@@ -81,8 +81,7 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
         CommonAddresses calldata _commonAddresses,
         ISolidlyRouter.Routes[] calldata _outputToNativeRoute,
         ISolidlyRouter.Routes[] calldata _nativeToLp0Route,
-        ISolidlyRouter.Routes[] calldata _lp0ToLp1Route,
-        bool _stable
+        ISolidlyRouter.Routes[] calldata _lp0ToLp1Route
     )  public initializer  {
          __StratFeeManager_init(_commonAddresses);
         want = _want;
@@ -147,7 +146,7 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
         uint256 wantBal = IERC20(want).balanceOf(address(this));
 
         if (wantBal < _amount) {
-            ISolidlychef(chef).withdraw(poolId, _amount - wantBal, address(this));
+            IGammaMasterchef(chef).withdraw(poolId, _amount - wantBal, address(this));
             wantBal = IERC20(want).balanceOf(address(this));
         }
 
@@ -182,7 +181,7 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
 
     // compounds earnings and charges performance fee
     function _harvest(address callFeeRecipient) internal whenNotPaused {
-        ISolidlychef(chef).harvest(poolId, address(this));
+        IGammaMasterchef(chef).harvest(poolId, address(this));
         uint256 outputBal = IERC20(output).balanceOf(address(this));
         if (outputBal > 0) {
             chargeFees(callFeeRecipient);
@@ -317,16 +316,9 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
         require (_token != address(want), "Reward Token");
         require (_token != address(output), "Output");
 
-        bool optedIn = ISolidlychef(chef).isOptIn(address(this), _token);
-        if (!optedIn) {
-            address[] memory tokens = new address[](1);
-            tokens[0] = _token;
-            ISolidlychef(chef).optIn(tokens);
-        }
-
         if (_route[0].from != address(0)) {
-            IERC20(_token).safeApprove(unirouter, 0);
-            IERC20(_token).safeApprove(unirouter, type(uint).max);
+            IERC20(_token).safeApprove(algebraV3Router, 0);
+            IERC20(_token).safeApprove(algebraV3Router, type(uint).max);
         } else {
             IERC20(_token).safeApprove(algebraV3Router, 0);
             IERC20(_token).safeApprove(algebraV3Router, type(uint).max);
@@ -343,9 +335,6 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
         extraRewards[_token].useUniV3 = _route[0].from == address(0) ? true : false;
     }
 
-    function emergencyOptOut(address[] memory _tokens) external onlyManager {
-        ISolidlychef(chef).emergencyOptOut(_tokens);
-    }
 
     function setHarvestOnDeposit(bool _harvestOnDeposit) external onlyManager {
         harvestOnDeposit = _harvestOnDeposit;
@@ -361,7 +350,7 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
     function retireStrat() external {
         require(msg.sender == vault, "!vault");
 
-        ISolidlychef(chef).withdraw(balanceOfPool());
+        IGammaMasterchef(chef).withdraw(poolId, balanceOfPool(), address(this));
 
         uint256 wantBal = IERC20(want).balanceOf(address(this));
         IERC20(want).transfer(vault, wantBal);
@@ -370,7 +359,7 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
     // pauses deposits and withdraws all funds from third party systems.
     function panic() public onlyManager {
         pause();
-        ISolidlychef(chef).withdraw(balanceOfPool());
+        IGammaMasterchef(chef).withdraw(poolId, balanceOfPool(), address(this));
     }
 
     function pause() public onlyManager {
@@ -390,32 +379,28 @@ contract StrategyGammaQuickMultiRewardChef is StratFeeManagerInitializable {
     function _giveAllowances() internal {
         IERC20(want).safeApprove(chef, type(uint).max);
         for (uint i; i < rewards.length; ++i) {
-            extraRewards[rewards[i]].useUniV3 
-                ? IERC20(rewards[i]).safeApprove(algebraV3Router, type(uint).max)
-                : IERC20(rewards[i]).safeApprove(unirouter, type(uint).max);
+            IERC20(rewards[i]).safeApprove(algebraV3Router, type(uint).max);
         }
 
-        IERC20(native).safeApprove(unirouter, 0);
-        IERC20(native).safeApprove(unirouter, type(uint).max);
+        IERC20(native).safeApprove(algebraV3Router, 0);
+        IERC20(native).safeApprove(algebraV3Router, type(uint).max);
 
-        IERC20(lpToken0).safeApprove(unirouter, 0);
-        IERC20(lpToken0).safeApprove(unirouter, type(uint).max);
+        IERC20(lpToken0).safeApprove(algebraV3Router, 0);
+        IERC20(lpToken0).safeApprove(algebraV3Router, type(uint).max);
 
-        IERC20(lpToken1).safeApprove(unirouter, 0);
-        IERC20(lpToken1).safeApprove(unirouter, type(uint).max);
+        IERC20(lpToken1).safeApprove(algebraV3Router, 0);
+        IERC20(lpToken1).safeApprove(algebraV3Router, type(uint).max);
     }
 
     function _removeAllowances() internal {
         IERC20(want).safeApprove(chef, 0);
          for (uint i; i < rewards.length; ++i) {
-            extraRewards[rewards[i]].useUniV3 
-                ? IERC20(rewards[i]).safeApprove(algebraV3Router, 0)
-                : IERC20(rewards[i]).safeApprove(unirouter, 0);
+            IERC20(rewards[i]).safeApprove(algebraV3Router, 0);
         }
 
-        IERC20(native).safeApprove(unirouter, 0);
-        IERC20(lpToken0).safeApprove(unirouter, 0);
-        IERC20(lpToken1).safeApprove(unirouter, 0);
+        IERC20(native).safeApprove(algebraV3Router, 0);
+        IERC20(lpToken0).safeApprove(algebraV3Router, 0);
+        IERC20(lpToken1).safeApprove(algebraV3Router, 0);
     }
 
     function _solidlyToRoute(ISolidlyRouter.Routes[] memory _route) internal pure returns (address[] memory) {
